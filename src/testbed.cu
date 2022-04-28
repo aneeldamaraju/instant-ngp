@@ -21,6 +21,7 @@
 #include <neural-graphics-primitives/render_buffer.h>
 #include <neural-graphics-primitives/takikawa_encoding.cuh>
 #include <neural-graphics-primitives/testbed.h>
+#include <neural-graphics-primitives/tinyexr_wrapper.h>
 #include <neural-graphics-primitives/trainable_buffer.cuh>
 #include <neural-graphics-primitives/triangle_bvh.cuh>
 #include <neural-graphics-primitives/triangle_octree.cuh>
@@ -281,6 +282,33 @@ inline float linear_to_db(float x) {
 	return -10.f*logf(x)/logf(10.f);
 }
 
+void Testbed::dump_parameters_as_images() {
+	size_t non_layer_params_width = 2048;
+
+	size_t layer_params = 0;
+	for (auto size : m_network->layer_sizes()) {
+		layer_params += size.first * size.second;
+	}
+
+	size_t non_layer_params = m_network->n_params() - layer_params;
+
+	float* params = m_trainer->params();
+	std::vector<float> params_cpu(layer_params + next_multiple(non_layer_params, non_layer_params_width), 0.0f);
+	CUDA_CHECK_THROW(cudaMemcpy(params_cpu.data(), params, m_network->n_params() * sizeof(float), cudaMemcpyDeviceToHost));
+
+	size_t offset = 0;
+	size_t layer_id = 0;
+	for (auto size : m_network->layer_sizes()) {
+		std::string filename = std::string{"layer-"} + std::to_string(layer_id) + ".exr";
+		save_exr(params_cpu.data() + offset, size.second, size.first, 1, 1, filename.c_str());
+		offset += size.first * size.second;
+		++layer_id;
+	}
+
+	std::string filename = "non-layer.exr";
+	save_exr(params_cpu.data() + offset, non_layer_params_width, non_layer_params / non_layer_params_width, 1, 1, filename.c_str());
+}
+
 #ifdef NGP_GUI
 bool imgui_colored_button(const char *name, float hue) {
 	ImGui::PushStyleColor(ImGuiCol_Button, (ImVec4)ImColor::HSV(hue, 0.6f, 0.6f));
@@ -362,7 +390,7 @@ void Testbed::imgui() {
 			ImGui::Text("Rays per batch: %d, Batch size: %d/%d", m_nerf.training.counters_rgb.rays_per_batch, m_nerf.training.counters_rgb.measured_batch_size, m_nerf.training.counters_rgb.measured_batch_size_before_compaction);
 		}
 		ImGui::Text("Steps: %d, Loss: %0.6f (%0.2f dB)", m_training_step, m_loss_scalar, linear_to_db(m_loss_scalar));
-		ImGui::PlotLines("loss graph", m_loss_graph, std::min(m_loss_graph_samples, 256), (m_loss_graph_samples < 256) ? 0 : (m_loss_graph_samples&255), 0, FLT_MAX, FLT_MAX, ImVec2(0, 50.f));
+		ImGui::PlotLines("loss graph", m_loss_graph, std::min(m_loss_graph_samples, 256u), (m_loss_graph_samples < 256u) ? 0 : (m_loss_graph_samples & 255u), 0, FLT_MAX, FLT_MAX, ImVec2(0, 50.f));
 
 		if (m_testbed_mode == ETestbedMode::Nerf && ImGui::TreeNode("NeRF training options")) {
 			ImGui::Checkbox("Random bg color", &m_nerf.training.random_bg_color);
@@ -432,7 +460,7 @@ void Testbed::imgui() {
 		ImGui::SameLine();
 		const auto& render_tex = m_render_surfaces.front();
 		ImGui::Text("%dx%d at %d spp", render_tex.resolution().x(), render_tex.resolution().y(), render_tex.spp());
-		ImGui::SliderInt("Max spp", &m_max_spp,0,1024, "%d", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat );
+		ImGui::SliderInt("Max spp", &m_max_spp, 0, 1024, "%d", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat );
 
 		if (!m_dynamic_res) {
 			ImGui::SliderInt("Fixed resolution factor", &m_fixed_res_factor, 8, 64);
@@ -686,6 +714,10 @@ void Testbed::imgui() {
 				ImGui::OpenPopup("Snapshot load error");
 				snapshot_load_error_string = std::string{"Failed to load snapshot: "} + e.what();
 			}
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Dump parameters as images")) {
+			dump_parameters_as_images();
 		}
 		if (ImGui::BeginPopupModal("Snapshot load error", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
 			ImGui::Text("%s", snapshot_load_error_string.c_str());
@@ -1646,6 +1678,8 @@ void Testbed::reset_network() {
 			m_num_levels = encoding_config.value("n_levels", 16u);
 		}
 
+		m_level_stats.resize(m_num_levels);
+
 		const uint32_t log2_hashmap_size = encoding_config.value("log2_hashmap_size", 15);
 
 		m_base_grid_resolution = encoding_config.value("base_resolution", 0);
@@ -1697,7 +1731,7 @@ void Testbed::reset_network() {
 			dims.n_pos,
 			n_dir_dims,
 			n_extra_dims,
-			4, // The offset of 4 comes from the dt member variable of NerfCoordinate. HACKY
+			dims.n_pos + 1, // The offset of 1 comes from the dt member variable of NerfCoordinate. HACKY
 			encoding_config,
 			dir_encoding_config,
 			network_config,
@@ -1751,7 +1785,6 @@ void Testbed::reset_network() {
 
 			m_encoding.reset(new TakikawaEncoding<precision_t>(
 				encoding_config["starting_level"],
-				encoding_config["sum_instead_of_concat"],
 				m_sdf.triangle_octree,
 				tcnn::string_to_interpolation_type(encoding_config.value("interpolation", "linear"))
 			));
@@ -2126,22 +2159,24 @@ void Testbed::gather_histograms() {
 	int first_encoder = first_encoder_param();
 	int n_encoding_params = n_params - first_encoder;
 
-	if (n_encoding_params > 0 && m_trainer->params()) {
-		std::vector<float> grid; grid.resize(n_encoding_params);
+	auto hg_enc = dynamic_cast<GridEncoding<network_precision_t>*>(m_encoding.get());
+	if (hg_enc && m_trainer->params()) {
+		std::vector<float> grid;
+		grid.resize(n_encoding_params);
 		CUDA_CHECK_THROW(cudaMemcpyAsync(grid.data(), m_trainer->params() + first_encoder, n_encoding_params * sizeof(float), cudaMemcpyDeviceToHost, m_training_stream));
 		CUDA_CHECK_THROW(cudaStreamSynchronize(m_training_stream));
 
-		int nperlevel = (int)(grid.size() / m_num_levels);
 		int numquant = 0;
-		for (int l = 0; l < m_num_levels && l<32; ++l) {
+		for (int l = 0; l < m_num_levels; ++l) {
+			size_t nperlevel = hg_enc->level_n_params(l);
 			LevelStats s = {};
-			const float* d = grid.data() + nperlevel * l;
-			for (int i = 0; i < nperlevel; ++i) {
+			const float* d = grid.data() + hg_enc->level_params_offset(l);
+			for (size_t i = 0; i < nperlevel; ++i) {
 				float v = *d++;
 				float av = fabsf(v);
-				if (av < 0.00001f)
+				if (av < 0.00001f) {
 					s.numzero++;
-				else {
+				} else {
 					if (s.count == 0) s.min = s.max = v;
 					s.count++;
 					s.x += v;
@@ -2154,7 +2189,8 @@ void Testbed::gather_histograms() {
 		}
 		m_quant_percent = float(numquant * 100) / (float)n_encoding_params;
 		if (m_histo_level < m_num_levels) {
-			const float* d = grid.data() + m_histo_level * nperlevel;
+			size_t nperlevel = hg_enc->level_n_params(m_histo_level);
+			const float* d = grid.data() + hg_enc->level_params_offset(m_histo_level);
 			float scale = 128.f / (m_histo_scale); // fixed scale for now to make it more comparable between levels
 			memset(m_histo, 0, sizeof(m_histo));
 			for (int i = 0; i < nperlevel; ++i) {

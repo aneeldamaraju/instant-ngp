@@ -8,13 +8,6 @@
 
 cmake_minimum_required(VERSION 3.19)
 
-if (CMAKE_VERSION EQUAL "3.23.0-rc1")
-	message(FATAL_ERROR
-		"Installed CMake version ${CMAKE_VERSION} is unable to build this project. "
-		"You must install the latest stable version 3.22.2 instead."
-	)
-endif()
-
 PROJECT(instant-ngp
 	VERSION 1.0
 	DESCRIPTION "Instant neural graphics primitives"
@@ -78,7 +71,7 @@ else()
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-mf16c")
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-Wno-float-conversion")
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-fno-strict-aliasing")
-	list(APPEND CUDA_NVCC_FLAGS "-fPIC")
+	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-fPIC")
 	set(CUDA_TOOLKIT_ROOT_DIR /opt/cuda/targets/x86_64-linux)
 endif()
 list(APPEND CUDA_NVCC_FLAGS "--extended-lambda")

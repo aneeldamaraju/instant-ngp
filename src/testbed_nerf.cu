@@ -67,9 +67,9 @@ static constexpr uint32_t MAX_STEPS_INBETWEEN_COMPACTION = 8;
 
 Testbed::NetworkDims Testbed::network_dims_nerf() const {
 	NetworkDims dims;
-	dims.n_input = 3;
+	dims.n_input = sizeof(NerfCoordinate) / sizeof(float);
 	dims.n_output = 4;
-	dims.n_pos = 3;
+	dims.n_pos = sizeof(NerfPosition) / sizeof(float);
 	return dims;
 }
 
@@ -753,7 +753,7 @@ __global__ void composite_kernel_nerf(
 	ENerfActivation rgb_activation,
 	ENerfActivation density_activation,
 	int show_accel,
-	float min_alpha
+	float min_transmittance
 ) {
 	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
 	if (i >= n_elements) return;
@@ -799,7 +799,7 @@ __global__ void composite_kernel_nerf(
 			// The normal is then in the opposite direction of the density gradient (i.e. the direction of decreasing density)
 			Vector3f normal = -network_to_density_derivative(float(local_network_output[3]), density_activation) * warped_pos;
 			rgb = normal.normalized().array();
-		} else if (render_mode == ERenderMode::Positions || render_mode == ERenderMode::EncodingVis) {
+		} else if (render_mode == ERenderMode::Positions) {
 			if (show_accel>=0) {
 				uint32_t mip = max(show_accel, mip_from_pos(pos));
 				uint32_t res = NERF_GRIDSIZE() >> mip;
@@ -811,11 +811,13 @@ __global__ void composite_kernel_nerf(
 				rgb.y() = rng.next_float();
 				rgb.z() = rng.next_float();
 			} else {
-				rgb = pos.array() * 16.f;
+				rgb = pos.array();
 				rgb.x() -= floorf(rgb.x());
 				rgb.y() -= floorf(rgb.y());
 				rgb.z() -= floorf(rgb.z());
 			}
+		} else if (render_mode == ERenderMode::EncodingVis) {
+			rgb = warped_pos.array();
 		} else if (render_mode == ERenderMode::Depth) {
 			float z=cam_fwd.dot(pos-origin) * depth_scale;
 			rgb = {z,z,z};
@@ -832,7 +834,7 @@ __global__ void composite_kernel_nerf(
 		local_rgba.head<3>() += rgb * weight;
 		local_rgba.w() += weight;
 
-		if (local_rgba.w() > (1.0f - min_alpha)) {
+		if (local_rgba.w() > (1.0f - min_transmittance)) {
 			local_rgba /= local_rgba.w();
 			break;
 		}
@@ -1884,7 +1886,7 @@ uint32_t Testbed::NerfTracer::trace(
 	ENerfActivation rgb_activation,
 	ENerfActivation density_activation,
 	int show_accel,
-	float min_alpha,
+	float min_transmittance,
 	const Eigen::Vector3f& light_dir,
 	cudaStream_t stream
 ) {
@@ -1972,7 +1974,7 @@ uint32_t Testbed::NerfTracer::trace(
 			rgb_activation,
 			density_activation,
 			show_accel,
-			min_alpha
+			min_transmittance
 		);
 
 		i += n_steps_between_compaction;
@@ -2072,7 +2074,7 @@ void Testbed::render_nerf(CudaRenderBuffer& render_buffer, const Vector2i& max_r
 			m_nerf.rgb_activation,
 			m_nerf.density_activation,
 			m_nerf.show_accel,
-			m_nerf.rendering_min_alpha,
+			m_nerf.rendering_min_transmittance,
 			m_nerf.light_dir.normalized(),
 			stream
 		);
