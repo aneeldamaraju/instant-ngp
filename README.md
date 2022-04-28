@@ -1,3 +1,9 @@
+# NEURO 240 Final Project
+This is a fork of the instant-ngp repo from NV labs. I make some modifications in order to allow for the use of a new data set that I use in my project report, as well as some new files in order to generate plots and other results found in the report.
+
+The rest of the readme is as taken from the original repository.
+
+
 # Instant Neural Graphics Primitives ![](https://github.com/NVlabs/instant-ngp/workflows/CI/badge.svg)
 
 <img src="docs/assets_readme/fox.gif" height="342"/> <img src="docs/assets_readme/robot5.gif" height="342"/>
